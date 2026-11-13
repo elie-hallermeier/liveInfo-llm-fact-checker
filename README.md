@@ -1,3 +1,7 @@
+<img width="1498" height="935" alt="image" src="https://github.com/user-attachments/assets/9494717a-0d08-4921-8e4f-380065013092" />
+
+
+
 # liveInfo
 
 Listens to a conversation and shows short info cards about whatever comes up (people, companies, places, tech, concepts), live and without being asked. It also fact-checks claims. Everything runs on your Mac, for free.
