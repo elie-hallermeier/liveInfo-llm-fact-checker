@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+ollama
+sounddevice
+numpy
+parakeet-mlx
+silero-vad
+pytest

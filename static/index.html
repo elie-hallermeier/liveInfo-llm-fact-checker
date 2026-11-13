@@ -1,0 +1,334 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>liveInfo</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='5' fill='%2334d399'/%3E%3C/svg%3E">
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f5f5f3;
+    --card: #ffffff;
+    --text: #18181b;
+    --muted: #5f5f68;
+    --faint: #a1a1aa;
+    --line: rgba(24, 24, 27, 0.08);
+    --live: #16a34a;
+    --busy: #d97706;
+    --off: #a1a1aa;
+    --bad: #dc2626;
+    --kind-saturation: 55%;
+    --kind-lightness: 42%;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0b0b0d;
+      --card: #151518;
+      --text: #ececef;
+      --muted: #a1a1aa;
+      --faint: #5e5e68;
+      --line: rgba(255, 255, 255, 0.07);
+      --live: #34d399;
+      --busy: #fbbf24;
+      --off: #71717a;
+      --bad: #f87171;
+      --kind-saturation: 75%;
+      --kind-lightness: 70%;
+    }
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body { margin: 0; background: var(--bg); color: var(--text); }
+
+  body {
+    min-height: 100vh;
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  header {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    background: color-mix(in srgb, var(--bg) 80%, transparent);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+  }
+
+  .status { display: flex; align-items: center; gap: 10px; font-size: 13px; font-weight: 500; color: var(--muted); }
+
+  .dot { position: relative; width: 8px; height: 8px; border-radius: 50%; background: var(--off); transition: background .3s; }
+  [data-mode="listening"] .dot { background: var(--live); }
+  [data-mode="starting"] .dot, [data-mode="offline"] .dot { background: var(--busy); animation: breathe 1.4s ease-in-out infinite; }
+  [data-mode="problem"] .dot { background: var(--bad); }
+  [data-mode="listening"][data-talking="true"] .dot::after {
+    content: "";
+    position: absolute;
+    inset: -5px;
+    border: 2px solid var(--live);
+    border-radius: 50%;
+    animation: ripple 1.1s ease-out infinite;
+  }
+
+  .actions { display: flex; gap: 2px; }
+
+  button {
+    display: grid;
+    place-items: center;
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--muted);
+    cursor: pointer;
+    transition: background .15s, color .15s, opacity .15s;
+  }
+  button:hover:not(:disabled) { background: var(--line); color: var(--text); }
+  button:disabled { opacity: .3; cursor: default; }
+  button svg { width: 16px; height: 16px; }
+
+  #note { margin: 0 16px 8px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--card); font-size: 13px; color: var(--muted); }
+  #note:empty { display: none; }
+
+  main { max-width: 640px; margin: 0 auto; padding: 4px 16px 140px; }
+
+  .card {
+    display: grid;
+    grid-template-rows: 0fr;
+    opacity: 0;
+    transform: translateY(-8px) scale(.985);
+    transition: grid-template-rows .4s cubic-bezier(.2, .8, .2, 1), opacity .35s ease, transform .4s cubic-bezier(.2, .8, .2, 1);
+  }
+  .card.shown { grid-template-rows: 1fr; opacity: 1; transform: none; }
+  .card.instant { transition: none; }
+  .clip { min-height: 0; overflow: hidden; }
+
+  article {
+    margin-bottom: 10px;
+    padding: 13px 16px 15px;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: var(--card);
+  }
+  .card.shown:not(.instant) article { animation: arrive 2.4s ease-out; }
+  .fact article {
+    border-color: hsl(var(--hue) var(--kind-saturation) var(--kind-lightness) / .35);
+    background: color-mix(in srgb, hsl(var(--hue) var(--kind-saturation) var(--kind-lightness)) 7%, var(--card));
+  }
+
+  .kind { font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: hsl(var(--hue) var(--kind-saturation) var(--kind-lightness)); }
+  h2 { margin: 1px 0 3px; font-size: 17px; font-weight: 600; line-height: 1.3; letter-spacing: -.01em; }
+  article p { margin: 0; font-size: 14.5px; color: var(--muted); }
+  .writing article p::after {
+    content: "";
+    display: inline-block;
+    width: 6px;
+    height: 1em;
+    margin-left: 3px;
+    border-radius: 2px;
+    vertical-align: -.15em;
+    background: hsl(var(--hue) var(--kind-saturation) var(--kind-lightness));
+    animation: blink 1s steps(2) infinite;
+  }
+
+  #empty {
+    position: fixed;
+    inset: 0;
+    display: grid;
+    place-content: center;
+    justify-items: center;
+    gap: 18px;
+    padding: 0 32px;
+    text-align: center;
+    font-size: 14px;
+    color: var(--faint);
+    pointer-events: none;
+  }
+  .has-cards #empty { display: none; }
+  .pulse { width: 44px; height: 44px; border: 1.5px solid var(--faint); border-radius: 50%; animation: pulse 2.4s ease-in-out infinite; transition: border-color .3s; }
+  [data-mode="listening"][data-talking="true"] .pulse { border-color: var(--live); }
+
+  footer {
+    position: fixed;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    padding: 32px 16px 16px;
+    background: linear-gradient(transparent, var(--bg) 32px);
+    pointer-events: none;
+  }
+  #phrases {
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    max-width: 640px;
+    max-height: calc(2 * 1.45em);
+    margin: 0 auto;
+    overflow: hidden;
+    font-size: 13px;
+    line-height: 1.45;
+    color: var(--faint);
+  }
+  #phrases p { margin: 0; }
+  #phrases span { animation: rise .35s ease-out; }
+  #phrases span:last-child { color: var(--muted); }
+
+  @keyframes ripple { from { transform: scale(.5); opacity: .9; } to { transform: scale(1.6); opacity: 0; } }
+  @keyframes breathe { 50% { opacity: .35; } }
+  @keyframes pulse { 50% { transform: scale(.82); opacity: .4; } }
+  @keyframes blink { 50% { opacity: 0; } }
+  @keyframes rise { from { opacity: 0; transform: translateY(4px); } }
+  @keyframes arrive { from { border-color: hsl(var(--hue) var(--kind-saturation) var(--kind-lightness) / .6); } }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; }
+  }
+</style>
+</head>
+<body data-mode="starting">
+<header>
+  <div class="status"><span class="dot"></span><span id="status-text">Loading models…</span></div>
+  <div class="actions">
+    <button id="toggle" disabled></button>
+    <button id="clear" title="Clear cards" aria-label="Clear cards">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3"/></svg>
+    </button>
+  </div>
+</header>
+<div id="note"></div>
+<main id="cards"></main>
+<div id="empty"><div class="pulse"></div><div id="empty-text">Loading models…</div></div>
+<footer><div id="phrases"><p id="caption"></p></div></footer>
+
+<script>
+  const KIND_HUES = { person: 275, company: 212, product: 190, place: 150, event: 28, technology: 232, science: 172, concept: 45, history: 12, art: 330, "fact check": 2 };
+  const STATUS_TEXT = { starting: "Loading models…", listening: "Listening", paused: "Paused", problem: "Something went wrong", offline: "Reconnecting…" };
+  const EMPTY_TEXT = {
+    starting: "Loading models…",
+    listening: "Talk, and cards about what is mentioned show up here.",
+    paused: "Paused. Press space to listen again.",
+    problem: "Something went wrong.",
+    offline: "Reconnecting…",
+  };
+  const PAUSE_ICON = '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1.2"/><rect x="14" y="5" width="4" height="14" rx="1.2"/></svg>';
+  const PLAY_ICON = '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.5v13a1 1 0 0 0 1.5.86l10.5-6.5a1 1 0 0 0 0-1.72L9.5 4.64A1 1 0 0 0 8 5.5z"/></svg>';
+
+  const cardList = document.getElementById("cards");
+  const toggleButton = document.getElementById("toggle");
+  const clearButton = document.getElementById("clear");
+  const statusText = document.getElementById("status-text");
+  const note = document.getElementById("note");
+  const emptyText = document.getElementById("empty-text");
+  const caption = document.getElementById("caption");
+  const cardElements = new Map();
+  let mode = "starting";
+  let socket;
+
+  function hueOf(kind) {
+    const key = kind.toLowerCase();
+    if (key in KIND_HUES) return KIND_HUES[key];
+    let hash = 0;
+    for (const character of key) hash = (hash * 31 + character.charCodeAt(0)) % 360;
+    return hash;
+  }
+
+  function showCard(card, animate = true) {
+    let element = cardElements.get(card.id);
+    if (!element) {
+      element = document.createElement("div");
+      element.className = "card";
+      element.classList.toggle("fact", card.kind.toLowerCase() === "fact check");
+      element.style.setProperty("--hue", hueOf(card.kind));
+      element.innerHTML = '<div class="clip"><article><div class="kind"></div><h2></h2><p></p></article></div>';
+      element.querySelector(".kind").textContent = card.kind;
+      element.querySelector("h2").textContent = card.title;
+      cardList.prepend(element);
+      cardElements.set(card.id, element);
+      document.body.classList.add("has-cards");
+      if (!animate) element.classList.add("instant");
+      element.offsetHeight;
+      element.classList.add("shown");
+    }
+    element.querySelector("p").textContent = card.body;
+    element.classList.toggle("writing", !card.done);
+  }
+
+  function clearCards() {
+    cardList.replaceChildren();
+    cardElements.clear();
+    document.body.classList.remove("has-cards");
+  }
+
+  function showPhrase(text) {
+    const piece = document.createElement("span");
+    piece.textContent = ` ${text}`;
+    caption.append(piece);
+    while (caption.children.length > 30) caption.firstElementChild.remove();
+  }
+
+  function showState(state) {
+    mode = state.mode;
+    document.body.dataset.mode = mode;
+    if (mode !== "listening") document.body.dataset.talking = "false";
+    statusText.textContent = STATUS_TEXT[mode];
+    emptyText.textContent = EMPTY_TEXT[mode];
+    note.textContent = state.note || "";
+    toggleButton.disabled = mode !== "listening" && mode !== "paused";
+    toggleButton.innerHTML = mode === "paused" ? PLAY_ICON : PAUSE_ICON;
+    toggleButton.title = mode === "paused" ? "Listen again (space)" : "Pause (space)";
+    toggleButton.setAttribute("aria-label", toggleButton.title);
+  }
+
+  function handle(event) {
+    if (event.type === "hello") {
+      clearCards();
+      event.cards.forEach((card) => showCard(card, false));
+      showState(event);
+    }
+    if (event.type === "state") showState(event);
+    if (event.type === "voice") document.body.dataset.talking = event.talking;
+    if (event.type === "phrase") showPhrase(event.text);
+    if (event.type === "card") showCard(event);
+    if (event.type === "cleared") clearCards();
+  }
+
+  function send(command) {
+    if (socket.readyState === WebSocket.OPEN) socket.send(command);
+  }
+
+  function toggleListening() {
+    if (mode === "listening") send("pause");
+    if (mode === "paused") send("resume");
+  }
+
+  function connect() {
+    socket = new WebSocket(`ws://${location.host}/live`);
+    socket.onmessage = (message) => handle(JSON.parse(message.data));
+    socket.onclose = () => {
+      showState({ mode: "offline" });
+      setTimeout(connect, 1000);
+    };
+  }
+
+  toggleButton.addEventListener("click", toggleListening);
+  clearButton.addEventListener("click", () => send("clear"));
+  document.addEventListener("keydown", (event) => {
+    if (event.code !== "Space" || event.repeat || event.target.closest("button")) return;
+    event.preventDefault();
+    toggleListening();
+  });
+
+  showState({ mode: "starting" });
+  connect();
+</script>
+</body>
+</html>
