@@ -74,15 +74,15 @@ Verdict: right
 LIST_MARKER = re.compile(r"^(?:[-*•]|\d+[.)])\s+")
 SENTENCE_END = re.compile(r"[.?!](?=\s|$)")
 CLAUSE_ENDINGS = (",", ".", "?", "!", ";", ":")
-WORDS_PER_LOOK = 8
+WORDS_PER_LOOK = {"en": 8, "he": 5}  # a Hebrew word often holds a few English ones: ובקוברנטיס is "and in Kubernetes"
 card_ids = itertools.count(1)
 
 
-def worth_a_look(text, still_talking):
+def worth_a_look(text, still_talking, language="en"):
     """Words go to the model in whole clauses rather than two-word scraps:
-    once a comma or a sentence end is heard, every 8 words, or when the speaker pauses."""
+    once a comma or a sentence end is heard, every 8 words (5 in Hebrew), or when the speaker pauses."""
     words = text.split()
-    return not still_talking or any(word.endswith(CLAUSE_ENDINGS) for word in words) or len(words) >= WORDS_PER_LOOK
+    return not still_talking or any(word.endswith(CLAUSE_ENDINGS) for word in words) or len(words) >= WORDS_PER_LOOK[language]
 
 
 def finished_sentences(text, speaker_paused):

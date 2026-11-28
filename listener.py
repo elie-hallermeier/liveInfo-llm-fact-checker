@@ -5,12 +5,18 @@ import time
 import warnings
 import wave
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import mlx.core as mx
+import mlx.nn as nn
 import numpy as np
 import sounddevice
 import torch
+from mlx_whisper.audio import HOP_LENGTH, log_mel_spectrogram
+from mlx_whisper.decoding import DecodingOptions, decode
+from mlx_whisper.load_models import load_model
+from mlx_whisper.timing import find_alignment
+from mlx_whisper.tokenizer import get_tokenizer
 from parakeet_mlx import from_pretrained
 from parakeet_mlx.audio import get_logmel
 from silero_vad import load_silero_vad
@@ -18,7 +24,8 @@ from silero_vad import load_silero_vad
 warnings.filterwarnings("ignore", category=FutureWarning, module="torch.jit")
 torch.set_num_threads(1)
 
-SPEECH_MODEL = "mlx-community/parakeet-tdt-0.6b-v3"
+PARAKEET = "mlx-community/parakeet-tdt-0.6b-v3"  # English and 24 other European languages
+HEBREW_WHISPER = "mlx-community/ivrit-ai-whisper-large-v3-turbo-mlx"  # ivrit.ai's Hebrew version of Whisper large-v3 turbo
 SAMPLE_RATE = 16000
 FRAME_SIZE = 512  # 32 ms, the frame size the Silero voice detector works on
 FRAME_SECONDS = FRAME_SIZE / SAMPLE_RATE
@@ -26,6 +33,7 @@ VOICE_STARTS = 0.5
 VOICE_CONTINUES = 0.35  # once a phrase has started, softer sounds still count as voice
 SETTLED_AFTER_SECONDS = 0.8  # a word this far behind the newest audio is no longer heard differently
 LONGEST_READ_SECONDS = 10  # in a long monologue, audio whose words are settled is dropped beyond this
+SILENCE_FOR_WHISPER_SECONDS = 2  # Whisper hears short audio well with this much silence after it, and makes words up without
 
 
 def frames_in(seconds):
@@ -120,10 +128,122 @@ class PhraseCutter:
         self.voice_probabilities = self.voice_probabilities[frame_count:]
 
 
+# Whisper learned Hebrew partly from subtitles that mangled words with a geresh (ג׳, צ׳, ז׳): such a word comes out
+# in Latin letters, with the geresh as its UTF-8 bytes D7 B3, written "XD7XB3" or even spelled out in Hebrew words.
+GERESH_SEPARATOR = r"[\s,.\-]*"
+GERESH_BYTES = GERESH_SEPARATOR.join(["(?:[Xx]|אקס)", "(?:די|[Dd]|ד)", "(?:7|שבע)", "(?:[Xx]|אקס)", "(?:בי|[Bb]|ב)", "(?:3|שלושה|שלוש)"])
+LATIN_LETTERS = rf"(?:(?!{GERESH_BYTES})[A-Za-z])*"
+MANGLED_GERESH = re.compile(rf"({LATIN_LETTERS})(?:(?<=[A-Za-zא-ת]){GERESH_SEPARATOR})?{GERESH_BYTES}({LATIN_LETTERS})")
+HEBREW_FOR_LATIN = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "אבצדאפגהיגכלמנופקרסתוווחיז")
+FINAL_FORMS = str.maketrans("כמנפצ", "ךםןףץ")
+
+
+def unmangled_geresh(text):
+    """Writes the words Whisper mangled in Hebrew letters again: GXD7XB3NSN is ג'נסן."""
+
+    def in_hebrew(match):
+        before, after = (letters.upper().translate(HEBREW_FOR_LATIN) for letters in match.groups())
+        if after and not match.string[match.end():match.end() + 1].isalpha():
+            after = after[:-1] + after[-1].translate(FINAL_FORMS)
+        return f"{before}'{after}"
+
+    return MANGLED_GERESH.sub(in_hebrew, text)
+
+
+def without_repeats(text):
+    """Whisper sometimes gets stuck saying the same words over and over: keeps the text up to where they start repeating."""
+    words = text.split()
+    seen_at = {}
+    for index in range(len(words) - 3):
+        four_words = tuple(words[index:index + 4])
+        seen_at.setdefault(four_words, []).append(index)
+        if len(seen_at[four_words]) == 3:
+            return " ".join(words[:seen_at[four_words][1]])
+    return text
+
+
+class Parakeet:
+    """Reads English and 24 other European languages."""
+
+    read_every_frames = READ_EVERY_FRAMES
+
+    def __init__(self):
+        self.model = from_pretrained(PARAKEET)
+
+    def words(self, audio):
+        """Gives the words in the audio, each with the second it starts and ends."""
+        mel = get_logmel(mx.array(audio), self.model.preprocessor_config)
+        words = []
+        for token in self.model.generate(mel)[0].tokens:
+            if token.text.startswith(" ") or not words:
+                words.append(Word(token.text.strip(), token.start, token.end))
+            else:
+                words[-1].text += token.text
+                words[-1].end = token.end
+        return words
+
+
+class AlreadyEncoded:
+    """Hands mlx-whisper's decoding and word alignment audio that is already encoded, whatever its length."""
+
+    def __init__(self, model, audio_features):
+        self.model = model
+        self.audio_features = audio_features
+
+    def encoder(self, audio_features):
+        return audio_features
+
+    def forward_with_cross_qk(self, mel, tokens):
+        logits, _, cross_qk = self.model.decoder(tokens, self.audio_features)
+        return logits, cross_qk
+
+    def __getattr__(self, name):
+        return getattr(self.model, name)
+
+
+class HebrewWhisper:
+    """Reads Hebrew. Whisper normally encodes 30 seconds of audio on every read; this encodes only the audio heard
+    and a little silence, which makes a read of a few seconds of speech take about 0.3s instead of 0.8s on an M4 Pro."""
+
+    read_every_frames = frames_in(1)  # Whisper is heavier: reading twice a second slows down the card model sharing the GPU
+
+    def __init__(self):
+        self.model = load_model(HEBREW_WHISPER)
+        self.tokenizer = get_tokenizer(True, num_languages=self.model.num_languages, language="he", task="transcribe")
+        self.options = DecodingOptions(language="he", without_timestamps=True, fp16=True)
+
+    def words(self, audio):
+        """Gives the words in the audio, each with the second it starts and ends."""
+        mel = log_mel_spectrogram(audio, n_mels=self.model.dims.n_mels, padding=SILENCE_FOR_WHISPER_SECONDS * SAMPLE_RATE)
+        heard = AlreadyEncoded(self.model, self.encode(mel.astype(mx.float16)))
+        options = replace(self.options, sample_len=10 + 15 * len(audio) // SAMPLE_RATE)  # twice what speech needs, so a stuck read ends soon
+        text = unmangled_geresh(without_repeats(decode(heard, heard.audio_features[0], options).text))
+        words = []
+        for piece in find_alignment(heard, self.tokenizer, self.tokenizer.encode(f" {text}"), mel, len(audio) // HOP_LENGTH):
+            if piece.word.startswith(" ") or not words:
+                words.append(Word(piece.word.strip(), float(piece.start), float(piece.end)))
+            else:
+                words[-1].text += piece.word
+                words[-1].end = float(piece.end)
+        return words
+
+    def encode(self, mel):
+        encoder = self.model.encoder
+        x = nn.gelu(encoder.conv1(mel[None]))
+        x = nn.gelu(encoder.conv2(x))
+        x = x + encoder._positional_embedding[: x.shape[1]]
+        for block in encoder.blocks:
+            x, _, _ = block(x)
+        return encoder.ln_post(x)
+
+
+SPEECH_MODELS = {"en": Parakeet, "he": HebrewWhisper}
+
+
 class Listener:
     """Listens to the microphone and gives the words being said, about a second after they are said."""
 
-    def __init__(self, device=None, save_audio_to=None):
+    def __init__(self, device=None, save_audio_to=None, language="en"):
         self.device = device
         self.recording = None
         if save_audio_to:
@@ -132,8 +252,8 @@ class Listener:
             self.recording.setsampwidth(2)
             self.recording.setframerate(SAMPLE_RATE)
         self.voice_detector = load_silero_vad()
-        self.speech_model = from_pretrained(SPEECH_MODEL)
-        self.transcribe(np.zeros(SAMPLE_RATE, dtype=np.float32))
+        self.speech_model = SPEECH_MODELS[language]()
+        self.speech_model.words(np.zeros(SAMPLE_RATE, dtype=np.float32))
         self.cutter = PhraseCutter()
         self.last_word = None
         self.frames_since_reading = 0
@@ -142,7 +262,8 @@ class Listener:
 
     def hear(self, frame):
         """Takes the next 32 ms of audio and returns the words that just became certain, if any.
-        While someone talks, the phrase is read twice a second; the rest of it is read when they pause."""
+        While someone talks, the phrase is read twice a second (once a second in Hebrew), or less often when reading falls
+        behind the microphone; the rest of it is read when they pause."""
         if self.recording:
             self.recording.writeframes((frame * 32767).astype(np.int16).tobytes())
         voice_probability = self.voice_detector(torch.from_numpy(frame), SAMPLE_RATE).item()
@@ -153,14 +274,14 @@ class Listener:
             self.last_word, self.frames_since_reading = None, 0
             return None
         self.frames_since_reading += 1
-        if self.frames_since_reading < READ_EVERY_FRAMES:
+        if self.frames_since_reading < self.speech_model.read_every_frames or not self.frames.empty():
             return None
         return self.read(np.concatenate(self.cutter.frames), ending=False)
 
     def read(self, audio, ending):
         self.frames_since_reading = 0
         heard_seconds = len(audio) / SAMPLE_RATE
-        words = settled_words(self.transcribe(audio), self.last_word, heard_seconds, ending)
+        words = settled_words(self.speech_model.words(audio), self.last_word, heard_seconds, ending)
         if ending:
             self.last_word = None
         elif words:
@@ -175,18 +296,6 @@ class Listener:
         self.cutter.forget_first(frame_count)
         shift = frame_count * FRAME_SECONDS
         self.last_word = Word(self.last_word.text, self.last_word.start - shift, self.last_word.end - shift)
-
-    def transcribe(self, audio):
-        """Gives the words in the audio, each with the second it starts and ends."""
-        mel = get_logmel(mx.array(audio), self.speech_model.preprocessor_config)
-        words = []
-        for token in self.speech_model.generate(mel)[0].tokens:
-            if token.text.startswith(" ") or not words:
-                words.append(Word(token.text.strip(), token.start, token.end))
-            else:
-                words[-1].text += token.text
-                words[-1].end = token.end
-        return words
 
     def open_microphone(self):
         self.stream = sounddevice.InputStream(
