@@ -17,16 +17,20 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 
 from cards import CardWriter, finished_sentences, worth_a_look
-from listener import Listener
+from listener import SPEECH_MODELS, Listener
 
 # The model that writes the cards and the fact checks. To try another one, change the number in MODEL and restart.
 # Lightest and quickest to load first, most knowledge last. All three write cards at about the same speed on an M4 Pro.
 MODELS = [
     "qwen3.5:4b-mlx",  # 4 GB, loads in 3s. Writes some junk cards, and its fact checks can get numbers wrong.
-    "gemma4:26b-nvfp4",  # 16 GB (about 24 GB in use), loads in 7s. Best results in the tests.
-    "qwen3.5:35b-mlx",  # 22 GB (about 30 GB in use), loads in 16s. Most knowledge; first card a little slower.
+    "gemma4:26b-nvfp4",  # 16 GB (about 24 GB in use), loads in 7s. Best results in the tests, in English and in Hebrew.
+    "qwen3.5:35b-mlx",  # 22 GB (about 30 GB in use), loads in 16s. Most knowledge; first card a little slower. Many junk cards in Hebrew.
 ]
-MODEL = MODELS[0]
+MODEL = MODELS[1]
+
+# The language of the conversation: "en" for English, which also works for 24 other European languages, or "he" for Hebrew.
+# The cards are written in English either way.
+LANGUAGE = "he"
 
 PAGE = Path(__file__).parent / "static" / "index.html"
 MIC_SILENT_NOTE = "The microphone gives no sound. Allow microphone access for this terminal in System Settings → Privacy & Security → Microphone."
@@ -35,10 +39,11 @@ MIC_SILENT_NOTE = "The microphone gives no sound. Allow microphone access for th
 class LiveInfo:
     """Connects the microphone listener, the card writer and the open windows."""
 
-    def __init__(self, model, fact_check_model, device, save_audio_to=None):
+    def __init__(self, model, fact_check_model, device, save_audio_to=None, language="en"):
         self.writer = CardWriter(model, fact_check_model)
         self.device = device
         self.save_audio_to = save_audio_to
+        self.language = language
         self.listener = None
         self.state = {"mode": "starting", "note": None}
         self.cards = {}
@@ -67,7 +72,7 @@ class LiveInfo:
 
     def listen(self, listener_ready):
         try:
-            self.listener = Listener(self.device, self.save_audio_to)
+            self.listener = Listener(self.device, self.save_audio_to, self.language)
             self.listener.open_microphone()
         except Exception as error:
             self.loop.call_soon_threadsafe(listener_ready.set_exception, error)
@@ -96,7 +101,7 @@ class LiveInfo:
         await self.send({"type": "phrase", "text": text})
 
     def check_words(self):
-        if self.words and worth_a_look(" ".join(text for text, _ in self.words), self.talking):
+        if self.words and worth_a_look(" ".join(text for text, _ in self.words), self.talking, self.language):
             self.words_ready.set()
 
     async def write_cards_forever(self):
@@ -208,13 +213,14 @@ def main():
     parser = argparse.ArgumentParser(description="Live info cards about whatever is said near your microphone.")
     parser.add_argument("--model", default=MODEL, help=f"Ollama model for the cards and fact checks (default: {MODEL}, picked at the top of app.py)")
     parser.add_argument("--fact-check-model", help="a different Ollama model for the fact checks (default: the same as --model)")
+    parser.add_argument("--language", choices=SPEECH_MODELS, default=LANGUAGE, help=f"the language spoken (default: {LANGUAGE}, picked at the top of app.py)")
     parser.add_argument("--device", help="microphone name or number from `python -m sounddevice` (default: the system microphone)")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--save-audio", metavar="FILE", help="also save everything the microphone hears to this .wav file, to replay it later")
     args = parser.parse_args()
     device = int(args.device) if args.device and args.device.isdigit() else args.device
     with contextlib.suppress(KeyboardInterrupt):  # Ctrl+C is how you quit, so no traceback for it
-        asyncio.run(serve(LiveInfo(args.model, args.fact_check_model, device, args.save_audio), args.port))
+        asyncio.run(serve(LiveInfo(args.model, args.fact_check_model, device, args.save_audio, args.language), args.port))
 
 
 if __name__ == "__main__":

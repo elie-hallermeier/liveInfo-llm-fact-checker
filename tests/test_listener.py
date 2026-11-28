@@ -3,7 +3,7 @@ import wave
 
 import numpy as np
 
-from listener import FRAME_SIZE, SAMPLE_RATE, Listener, PhraseCutter, Word, settled_words
+from listener import FRAME_SIZE, SAMPLE_RATE, Listener, PhraseCutter, Word, settled_words, unmangled_geresh, without_repeats
 
 VOICE = 0.9
 QUIET = 0.05
@@ -80,9 +80,42 @@ def test_when_the_last_word_was_heard_differently_the_next_words_are_found_by_ti
     assert texts(settled_words(changed, last_word=Word("week", 0.5, 0.7), heard_seconds=3.0, ending=False)) == ["in"]
 
 
-def spoken(text, folder):
+def test_words_whisper_mangled_are_written_in_hebrew_letters_again():
+    assert unmangled_geresh("קראתי על אנבידיה ועל GXD7XB3NSN-הונג בתל אביב.") == "קראתי על אנבידיה ועל ג'נסן-הונג בתל אביב."
+    assert unmangled_geresh("הלכנו לראות את GX-D7XB3WRGX-D7XB3 קלוני.") == "הלכנו לראות את ג'ורג' קלוני."
+    assert unmangled_geresh("הצייר האהוב עליי הוא קרואג Xד7XB3W, השימוש שלו באור") == "הצייר האהוב עליי הוא קרואג'ו, השימוש שלו באור"
+    assert unmangled_geresh("התמונות של טלסקופ GXD-7XB-3 ייימס ווב") == "התמונות של טלסקופ ג' ייימס ווב"
+    assert unmangled_geresh("הוא קרואג אקס די שבע אקס בי שלוש דביו, השימוש") == "הוא קרואג' דביו, השימוש"
+
+
+def test_mangled_tech_words_in_any_case_are_written_in_hebrew_letters_again():
+    assert unmangled_geresh("בואו נפתח תיאקט BG-X-D7-X-B3 ירה") == "בואו נפתח תיאקט בג' ירה"
+    assert unmangled_geresh("הפלפליין ב-GX-D7-XB3 נקינז נופל") == "הפלפליין ב-ג' נקינז נופל"
+    assert unmangled_geresh("ומחזיר תשובה ב-GX-D7x ב-3 יישום.") == "ומחזיר תשובה ב-ג' יישום."
+    assert unmangled_geresh("הפיק xd7xb3R החדש שבר את") == "הפיק'ר החדש שבר את"
+
+
+def test_hebrew_without_mangled_words_stays_as_it_is():
+    for text in ["הבנק המרכזי ממשיך להעלות את הריבית בגלל האינפלציה.", "We shot it on an XD-7 camera with GPT-4 notes."]:
+        assert unmangled_geresh(text) == text
+
+
+def test_whisper_stuck_repeating_itself_is_cut_off_where_the_repeating_starts():
+    stuck = "ראיתה את התמונות של טלסקופ ג'אה את התמונות של טלסקופ ג'אה את התמונות של טלסקופ ג'אה את התמונות"
+
+    assert without_repeats(stuck) == "ראיתה את התמונות של טלסקופ ג'אה"
+    assert without_repeats("הוא הוא הוא הוא הוא הוא הוא הוא") == "הוא"
+
+
+def test_a_speaker_starting_over_is_not_cut_off():
+    text = "אני חושב שאנחנו צריכים אני חושב שאנחנו צריכים ללכת הביתה"
+
+    assert without_repeats(text) == text
+
+
+def spoken(text, folder, voice="Samantha"):
     aiff_path, wav_path = folder / "speech.aiff", folder / "speech.wav"
-    subprocess.run(["say", "-v", "Samantha", "-o", aiff_path, text], check=True)
+    subprocess.run(["say", "-v", voice, "-o", aiff_path, text], check=True)
     subprocess.run(["afconvert", "-f", "WAVE", "-d", f"LEI16@{SAMPLE_RATE}", "-c", "1", aiff_path, wav_path], check=True)
     with wave.open(str(wav_path)) as wav_file:
         samples = np.frombuffer(wav_file.readframes(wav_file.getnframes()), dtype=np.int16)
@@ -123,6 +156,28 @@ def test_a_long_sentence_is_heard_while_it_is_still_being_said(tmp_path):
     assert berlin_heard_at < 4
     assert text.count("Berlin") == 1
     assert "protein folding" in text.lower()
+
+
+def test_a_listener_that_fell_behind_the_microphone_reads_the_phrase_only_once_it_ends(tmp_path):
+    audio = spoken("So last week I was in Berlin for a conference about large language models and the way they reason", tmp_path)
+    listener = Listener()
+    listener.frames.put(np.zeros(FRAME_SIZE, dtype=np.float32))
+
+    heard = hear_all(listener, audio)
+
+    assert len(heard) == 1
+    assert "Berlin" in heard[0][0]
+
+
+def test_hears_hebrew(tmp_path):
+    audio = spoken("הבנק המרכזי ממשיך להעלות את הריבית בגלל האינפלציה. [[slnc 900]] חיים ויצמן היה הנשיא הראשון של מדינת ישראל.", tmp_path, "Carmit")
+
+    heard = hear_all(Listener(language="he"), audio)
+    text = " ".join(piece for piece, _ in heard)
+
+    assert text.count("האינפלציה") == 1
+    assert text.count("ויצמן") == 1
+    assert text.index("האינפלציה") < text.index("ויצמן")
 
 
 def test_can_save_what_it_hears_for_a_replay(tmp_path):

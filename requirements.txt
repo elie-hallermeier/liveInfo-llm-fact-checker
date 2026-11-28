@@ -6,3 +6,4 @@ numpy
 parakeet-mlx
 silero-vad
 pytest
+mlx-whisper

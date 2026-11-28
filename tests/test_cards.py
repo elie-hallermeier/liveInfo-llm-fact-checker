@@ -221,6 +221,11 @@ def test_a_long_run_of_words_does_not_wait_for_punctuation():
     assert worth_a_look("So last week I was in Berlin for", still_talking=True)
 
 
+def test_hebrew_goes_to_the_model_after_fewer_words():
+    assert worth_a_look("אחרי שהפול ריקווסט עובר קוד ריוויו", still_talking=True, language="he")
+    assert not worth_a_look("After the pull request passes code", still_talking=True)
+
+
 def test_a_pause_sends_whatever_was_said():
     assert worth_a_look("the sequel is", still_talking=False)
 
