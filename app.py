@@ -26,11 +26,11 @@ MODELS = [
     "gemma4:26b-nvfp4",  # 16 GB (about 24 GB in use), loads in 7s. Best results in the tests, in English and in Hebrew.
     "qwen3.5:35b-mlx",  # 22 GB (about 30 GB in use), loads in 16s. Most knowledge; first card a little slower. Many junk cards in Hebrew.
 ]
-MODEL = MODELS[1]
+MODEL = MODELS[0]
 
 # The language of the conversation: "en" for English, which also works for 24 other European languages, or "he" for Hebrew.
 # The cards are written in English either way.
-LANGUAGE = "he"
+LANGUAGE = "en"
 
 PAGE = Path(__file__).parent / "static" / "index.html"
 MIC_SILENT_NOTE = "The microphone gives no sound. Allow microphone access for this terminal in System Settings → Privacy & Security → Microphone."
